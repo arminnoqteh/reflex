@@ -337,7 +337,6 @@ func decodeAddress(data []byte) (xnet.Destination, []byte, error) {
 }
 
 // handleFallback handles non-Reflex connections (from step 2)
-// TODO: Step 4 - Implement fallback to web server
 func (h *Handler) handleFallback(ctx context.Context, reader *bufio.Reader, conn stat.Connection) error {
 	if h.fallback == nil || h.fallback.Dest == "" {
 		return errors.New("no fallback configured")
