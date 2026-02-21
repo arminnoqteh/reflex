@@ -79,3 +79,52 @@ func (h *Handler) handleData(ctx context.Context, data []byte, conn stat.Connect
     // ToDO
     return nil
 }
+
+
+// decodeAddress: parses the destination address from the first data frame
+// format: [addrType(1)][port(2)][addr...][remaining data]
+// addrType: 1=IPv4, 2=Domain, 3=IPv6
+func decodeAddress(data []byte) (net.Destination, []byte, error) {
+    if len(data) < 3 {
+        return net.Destination{}, nil, errors.New("invalid address data: too short")
+    }
+
+    addrType := data[0]
+    port := net.PortFromBytes(data[1:3])
+    off := 3
+
+    var addr net.Address
+
+    switch addrType {
+    case 1: // IPv4
+        if len(data) < off+4 {
+            return net.Destination{}, nil, errors.New("invalid IPv4 address")
+        }
+        addr = net.IPAddress(data[off : off+4])
+        off += 4
+
+    case 2: // Domain
+        if len(data) < off+1 {
+            return net.Destination{}, nil, errors.New("invalid domain address")
+        }
+        domainLen := int(data[off])
+        off++
+        if len(data) < off+domainLen {
+            return net.Destination{}, nil, errors.New("invalid domain address")
+        }
+        addr = net.DomainAddress(string(data[off : off+domainLen]))
+        off += domainLen
+
+    case 3: // IPv6
+        if len(data) < off+16 {
+            return net.Destination{}, nil, errors.New("invalid IPv6 address")
+        }
+        addr = net.IPAddress(data[off : off+16])
+        off += 16
+
+    default:
+        return net.Destination{}, nil, errors.New("unknown address type")
+    }
+
+    return net.TCPDestination(addr, port), data[off:], nil
+}
