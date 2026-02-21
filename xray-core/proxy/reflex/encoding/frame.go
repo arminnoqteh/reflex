@@ -52,3 +52,32 @@ func (s *Session) ReadFrame(r io.Reader) (*Frame, error) {
         Payload: payload,
     }, nil
 }
+
+
+// WriteFrame: encrypts and writes a frame to the writer
+func (s *Session) WriteFrame(w io.Writer, frameType uint8, payload []byte) error {
+    s.mu.Lock()
+    defer s.mu.Unlock()
+
+    // encrypt the payload
+    nonce := makeNonce(s.writeNonce)
+    s.writeNonce++
+
+    encrypted := s.aead.Seal(nil, nonce[:], payload, nil)
+
+    // write frame header
+    header := make([]byte, 3)
+    header[0] = frameType
+    binary.BigEndian.PutUint16(header[1:3], uint16(len(encrypted)))
+
+    if _, err := w.Write(header); err != nil {
+        return err
+    }
+
+    // write encrypted payload
+    if _, err := w.Write(encrypted); err != nil {
+        return err
+    }
+
+    return nil
+}
