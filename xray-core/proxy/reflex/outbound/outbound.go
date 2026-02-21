@@ -131,6 +131,12 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 		return err
 	}
 
+	// Get traffic profile
+	var profile *encoding.TrafficProfile
+	if h.policy != "" {
+		profile = encoding.Profiles[h.policy]
+	}
+
 	// Get target destination
 	outbounds := session.OutboundsFromContext(ctx)
 	if len(outbounds) == 0 {
@@ -142,9 +148,9 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 	}
 	dest := ob.Target
 
-	// Encode and send destination in first data frame using simple WriteFrame
+	// Encode and send destination in first data frame
 	addrData := encodeAddress(dest)
-	if err := sess.WriteFrame(rawConn, reflex.FrameTypeData, addrData); err != nil {
+	if err := sess.WriteFrameWithMorphing(rawConn, reflex.FrameTypeData, addrData, profile); err != nil {
 		return err
 	}
 
@@ -159,8 +165,7 @@ func (h *Handler) Process(ctx context.Context, link *transport.Link, dialer inte
 				return err
 			}
 			for _, b := range mb {
-				// Changed from WriteFrameWithMorphing to normal WriteFrame
-				if err := sess.WriteFrame(rawConn, reflex.FrameTypeData, b.Bytes()); err != nil {
+				if err := sess.WriteFrameWithMorphing(rawConn, reflex.FrameTypeData, b.Bytes(), profile); err != nil {
 					b.Release()
 					return err
 				}
