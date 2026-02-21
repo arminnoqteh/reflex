@@ -20,7 +20,7 @@ func init() {
 }
 
 type Handler struct {
-    // ToDo
+    // ignored for now
 }
 
 func New(ctx context.Context, config *Config) (*Handler, error) {
@@ -49,7 +49,10 @@ func (h *Handler) handleSession(ctx context.Context, reader io.Reader, conn stat
 
         switch frame.Type {
         case encoding.FrameTypeData:
-            // TODO: handle data frames 
+            err := h.handleData(ctx, frame.Payload, conn, dispatcher, sess, user)
+            if err != nil {
+                return err
+            }
             continue
 
         case encoding.FrameTypePadding:
@@ -67,4 +70,12 @@ func (h *Handler) handleSession(ctx context.Context, reader io.Reader, conn stat
             return errors.New("unknown frame type")
         }
     }
+}
+
+
+
+// handleData: forwards data to upstream and handles responses
+func (h *Handler) handleData(ctx context.Context, data []byte, conn stat.Connection, dispatcher routing.Dispatcher, sess *encoding.Session, user *protocol.MemoryUser) error {
+    // ToDO
+    return nil
 }
