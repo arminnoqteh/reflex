@@ -11,9 +11,11 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/xtls/xray-core/common"
+	"github.com/xtls/xray-core/common/buf"
 	"github.com/xtls/xray-core/common/errors"
 	xnet "github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/common/protocol"
+	"github.com/xtls/xray-core/common/session"
 	"github.com/xtls/xray-core/common/task"
 	"github.com/xtls/xray-core/core"
 	feature_inbound "github.com/xtls/xray-core/features/inbound"
@@ -112,7 +114,7 @@ func (h *Handler) Process(ctx context.Context, network xnet.Network, conn stat.C
 		return h.handleFallback(ctx, reader, conn)
 	}
 
-	// Authenticate user (Keyword for grading)
+	// Authenticate user
 	userUUID := uuid.UUID(clientHS.UserID)
 	user, ok := h.clients.Get(userUUID.String())
 	if !ok {
@@ -148,17 +150,15 @@ func (h *Handler) Process(ctx context.Context, network xnet.Network, conn stat.C
 		return err
 	}
 
-	_ = user // Use user variable to avoid warning
-
 	var profile *encoding.TrafficProfile
 	if acc, ok := user.Account.(*reflex.MemoryAccount); ok && acc.Policy != "" {
 		profile = encoding.Profiles[acc.Policy]
 	}
+	_ = profile // Used in step 5
 
-	// TODO: Step 3 - Handle the encrypted session and data forwarding
-	// return h.handleSession(handshakeCtx, reader, conn, dispatcher, sess, profile)
-
-	return nil
+	// Handle the encrypted session (from step 3)
+	// TODO: Step 4 - Add fallback and multiplexing
+	return h.handleSession(handshakeCtx, reader, conn, dispatcher, sess, user)
 }
 
 func (h *Handler) isReflexHandshake(peeked []byte) bool {
@@ -206,7 +206,138 @@ func (c *preloadedConn) Read(b []byte) (int, error) {
 	return c.Reader.Read(b)
 }
 
-// handleFallback handles non-Reflex connections
+// handleSession processes the encrypted session (from step 3)
+func (h *Handler) handleSession(ctx context.Context, reader io.Reader, conn stat.Connection, dispatcher routing.Dispatcher, sess *encoding.Session, user *protocol.MemoryUser) error {
+	for {
+		frame, err := sess.ReadFrame(reader)
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+
+		switch frame.Type {
+		case encoding.FrameTypeData:
+			err := h.handleData(ctx, frame.Payload, conn, dispatcher, sess, user)
+			if err != nil {
+				return err
+			}
+			continue
+
+		case encoding.FrameTypePadding:
+			// ignored for now (step 5)
+			continue
+
+		case encoding.FrameTypeTiming:
+			// ignored for now (step 5)
+			continue
+
+		case encoding.FrameTypeClose:
+			return nil
+
+		default:
+			return errors.New("unknown frame type")
+		}
+	}
+}
+
+// handleData forwards data to upstream and handles responses (from step 3)
+func (h *Handler) handleData(ctx context.Context, data []byte, conn stat.Connection, dispatcher routing.Dispatcher, sess *encoding.Session, user *protocol.MemoryUser) error {
+	// parse destination from the data frame
+	dest, remaining, err := decodeAddress(data)
+	if err != nil {
+		return err
+	}
+
+	// add user info to context for logging/policy
+	ctx = session.ContextWithInbound(ctx, &session.Inbound{
+		User: user,
+	})
+
+	// dispatch to target
+	link, err := dispatcher.Dispatch(ctx, dest)
+	if err != nil {
+		return err
+	}
+
+	// send any remaining data that came with the first frame
+	if len(remaining) > 0 {
+		if err := link.Writer.WriteMultiBuffer(buf.MultiBuffer{buf.FromBytes(remaining)}); err != nil {
+			return err
+		}
+	}
+
+	// handle responses from target: read from upstream and send back to client
+	go func() {
+		defer link.Writer.Close()
+		for {
+			mb, err := link.Reader.ReadMultiBuffer()
+			if err != nil {
+				return
+			}
+			for _, b := range mb {
+				if err := sess.WriteFrame(conn, encoding.FrameTypeData, b.Bytes()); err != nil {
+					return
+				}
+				b.Release()
+			}
+		}
+	}()
+
+	return nil
+}
+
+// decodeAddress parses the destination address from the first data frame (from step 3)
+// format: [addrType(1)][port(2)][addr...][remaining data]
+// addrType: 1=IPv4, 2=Domain, 3=IPv6
+func decodeAddress(data []byte) (xnet.Destination, []byte, error) {
+	if len(data) < 3 {
+		return xnet.Destination{}, nil, errors.New("invalid address data: too short")
+	}
+
+	addrType := data[0]
+	port := xnet.PortFromBytes(data[1:3])
+	off := 3
+
+	var addr xnet.Address
+
+	switch addrType {
+	case 1: // IPv4
+		if len(data) < off+4 {
+			return xnet.Destination{}, nil, errors.New("invalid IPv4 address")
+		}
+		addr = xnet.IPAddress(data[off : off+4])
+		off += 4
+
+	case 2: // Domain
+		if len(data) < off+1 {
+			return xnet.Destination{}, nil, errors.New("invalid domain address")
+		}
+		domainLen := int(data[off])
+		off++
+		if len(data) < off+domainLen {
+			return xnet.Destination{}, nil, errors.New("invalid domain address")
+		}
+		addr = xnet.DomainAddress(string(data[off : off+domainLen]))
+		off += domainLen
+
+	case 3: // IPv6
+		if len(data) < off+16 {
+			return xnet.Destination{}, nil, errors.New("invalid IPv6 address")
+		}
+		addr = xnet.IPAddress(data[off : off+16])
+		off += 16
+
+	default:
+		return xnet.Destination{}, nil, errors.New("unknown address type")
+	}
+
+	return xnet.TCPDestination(addr, port), data[off:], nil
+}
+
+// handleFallback handles non-Reflex connections (from step 2)
+// TODO: Step 4 - Implement fallback to web server
 func (h *Handler) handleFallback(ctx context.Context, reader *bufio.Reader, conn stat.Connection) error {
 	if h.fallback == nil || h.fallback.Dest == "" {
 		return errors.New("no fallback configured")
