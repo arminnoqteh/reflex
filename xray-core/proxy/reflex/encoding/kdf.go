@@ -46,18 +46,3 @@ func HKDF(hash func() hash.Hash, ikm, salt, info []byte, length int) ([]byte, er
 	_, err := io.ReadFull(h, result)
 	return result, err
 }
-
-// DeriveSessionKey derives a session key from a shared secret using HKDF
-// This is used by the tests and for compatibility with step 2 code
-func DeriveSessionKey(sharedSecret [32]byte, salt []byte, info []byte) ([32]byte, error) {
-	var key [32]byte
-	
-	// Use HKDF with SHA-256
-	hkdfReader := hkdf.New(sha256.New, sharedSecret[:], salt, info)
-	
-	if _, err := io.ReadFull(hkdfReader, key[:]); err != nil {
-		return [32]byte{}, err
-	}
-	
-	return key, nil
-}
